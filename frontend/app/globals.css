@@ -1,0 +1,43 @@
+:root {
+  color-scheme: light;
+  --background: #f4f7fb;
+  --surface: #ffffff;
+  --surface-muted: #f7f9fc;
+  --line: #d9e2ec;
+  --text: #182433;
+  --muted: #627083;
+  --primary: #0b63ce;
+  --primary-hover: #084fba;
+  --danger: #a32020;
+  --success: #1f6f43;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-family: Arial, "Hiragino Sans", "Yu Gothic", sans-serif;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+}

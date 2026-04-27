@@ -1,0 +1,21 @@
+[project]
+name = "mlit-dpf-mcp"
+version = "0.1.0"
+description = "MCP server for MLIT (MLIT Data Platform wrapper)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT License" }
+
+dependencies = [
+  "aiohttp>=3.9",
+  "pydantic>=2.7",
+  "tenacity>=8.2",            # retry backoff (optional)
+  "python-json-logger>=2.0",  # log 
+  "mcp>=1.2",                 # SDK MCP (server)
+  "typer>=0.12",              # (optional) CLI 
+  "python-dotenv>=1.0"
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-q"

@@ -1,0 +1,52 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      REINFOLIB_MCP_COMMAND: ${REINFOLIB_MCP_COMMAND:-python mcp-server/mlit-geospatial-mcp/src/server.py}
+      REINFOLIB_MCP_TOOL: ${REINFOLIB_MCP_TOOL:-}
+      MLIT_DATA_PLATFORM_MCP_COMMAND: ${MLIT_DATA_PLATFORM_MCP_COMMAND:-python mcp-server/mlit-dpf-mcp/src/server.py}
+      MLIT_DATA_PLATFORM_MCP_TOOL: ${MLIT_DATA_PLATFORM_MCP_TOOL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mcp-reinfolib
+      - mcp-data-platform
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  mcp-reinfolib:
+    build:
+      context: .
+      dockerfile: mcp-server/Dockerfile
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    stdin_open: true
+    tty: true
+
+  mcp-data-platform:
+    build:
+      context: .
+      dockerfile: mcp-server/Dockerfile.dpf
+    env_file:
+      - .env
+    environment:
+      MLIT_BASE_URL: ${MLIT_BASE_URL:-https://data-platform.mlit.go.jp/api/v1/}
+      PYTHONUNBUFFERED: "1"
+    stdin_open: true
+    tty: true

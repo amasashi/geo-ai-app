@@ -1,0 +1,12 @@
+MLIT-DPF-MCP
+Copyright (c) 2025 MLIT Japan
+Licensed under the MIT License.
+
+This product includes software developed by third parties:
+
+- aiohttp (Apache License 2.0)
+- tenacity (Apache License 2.0)
+- pydantic (MIT License)
+- typer (MIT License)
+- python-json-logger (BSD 2-Clause)
+- python-dotenv (BSD 3-Clause)

@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
-import type { GeoJSON as LeafletGeoJSON, Map as LeafletMap } from "leaflet";
-import type { GeoJsonObject } from "geojson";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { GeoJSON as LeafletGeoJSON, Layer, Map as LeafletMap, PathOptions } from "leaflet";
+import type { Feature, FeatureCollection, GeoJsonObject, Geometry } from "geojson";
 import markerIcon from "leaflet/dist/images/marker-icon.png";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
@@ -20,6 +20,7 @@ type MlitStatus = {
 };
 
 type MlitQueryResponse = {
+  request_id?: string;
   query: string;
   provider?: string;
   tool: string;
@@ -39,10 +40,22 @@ type DataPlatformDetailResponse = {
   thumbnail_warning?: string | null;
 };
 
+type FeatureSummary = {
+  key: string;
+  title: string;
+  subtitle: string;
+  providerLabel: string;
+  geometryType: string;
+  coordinateLabel: string;
+  properties: JsonRecord;
+};
+
+type PanelTab = "detail" | "raw";
+
 const examples = [
-  "東京駅周辺の地価公示ポイント",
+  "東京駅周辺 5km の道路を国土交通データプラットフォームから検索",
   "新宿駅周辺の用途地域",
-  "東京駅周辺のバス停を国土交通データプラットフォームから検索",
+  "東京駅周辺の地価公示ポイント",
   "35.681236,139.767125 周辺の都市計画"
 ];
 
@@ -58,6 +71,8 @@ const imagePropertyKeys = [
   "URL",
   "url"
 ];
+
+const hiddenPropertyKeys = new Set(["__geoai_key"]);
 
 function assetSrc(asset: string | { src: string }): string {
   return typeof asset === "string" ? asset : asset.src;
@@ -158,6 +173,19 @@ function findDownloadUrl(detailResponse?: DataPlatformDetailResponse | null): st
   );
 }
 
+function titleFromProperties(properties: JsonRecord, detail?: JsonRecord | null): string {
+  const metadata = findMetadata(detail);
+  return (
+    textValue(properties.name) ||
+    textValue(properties.title) ||
+    textValue(properties.Name) ||
+    textValue(properties["名称"]) ||
+    textValue(detail?.title) ||
+    textValue(metadata["DPF:title"]) ||
+    "MLIT data"
+  );
+}
+
 function popupRow(label: string, value: unknown): string {
   const display = textValue(value);
   if (!display) {
@@ -173,14 +201,7 @@ function buildPopupContent(
 ): string {
   const detail = detailResponse?.detail || null;
   const metadata = findMetadata(detail);
-  const title =
-    textValue(properties.name) ||
-    textValue(properties.title) ||
-    textValue(properties.Name) ||
-    textValue(properties["名称"]) ||
-    textValue(detail?.title) ||
-    textValue(metadata["DPF:title"]) ||
-    "MLIT data";
+  const title = titleFromProperties(properties, detail);
   const imageUrl = findImageUrl(properties, detailResponse);
   const downloadUrl = findDownloadUrl(detailResponse);
   const rows = [
@@ -206,17 +227,142 @@ function buildPopupContent(
   return `<div class="geo-popup"><strong class="geo-popup-title">${escapeHtml(title)}</strong>${image}<div class="geo-popup-rows">${rows}</div>${link}${loading}${thumbnailWarning}</div>`;
 }
 
+function isFeatureCollection(value: GeoJsonObject): value is FeatureCollection {
+  return value.type === "FeatureCollection";
+}
+
+function isFeature(value: GeoJsonObject): value is Feature {
+  return value.type === "Feature";
+}
+
+function featureKey(properties: JsonRecord, index: number): string {
+  const stablePart =
+    textValue(properties.id) ||
+    textValue(properties["DPF:id"]) ||
+    textValue(properties.title) ||
+    textValue(properties.name) ||
+    "feature";
+  return `${index}-${stablePart}`;
+}
+
+function coordinateLabel(geometry: Geometry | null): string {
+  if (!geometry || geometry.type !== "Point") {
+    return "";
+  }
+  const [lon, lat] = geometry.coordinates;
+  if (typeof lat !== "number" || typeof lon !== "number") {
+    return "";
+  }
+  return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+}
+
+function subtitleFromProperties(properties: JsonRecord): string {
+  return (
+    textValue(properties["DPF:object_category"]) ||
+    textValue(properties.dataset_id) ||
+    textValue(properties["DPF:dataset_id"]) ||
+    textValue(properties.catalog_id) ||
+    textValue(properties["DPF:catalog_id"]) ||
+    "GeoJSON Feature"
+  );
+}
+
+function providerLabel(properties: JsonRecord): string {
+  const catalog = textValue(properties.catalog_id) || textValue(properties["DPF:catalog_id"]);
+  if (catalog === "rsdb") {
+    return "道路DB";
+  }
+  if (catalog === "nlni_ksj") {
+    return "国土数値情報";
+  }
+  return catalog || "MLIT";
+}
+
+function decorateFeature(feature: Feature, index: number): { feature: Feature; summary: FeatureSummary } {
+  const properties = { ...(asRecord(feature.properties) || {}) };
+  const key = featureKey(properties, index);
+  properties.__geoai_key = key;
+  const decoratedFeature = { ...feature, properties };
+
+  return {
+    feature: decoratedFeature,
+    summary: {
+      key,
+      title: titleFromProperties(properties),
+      subtitle: subtitleFromProperties(properties),
+      providerLabel: providerLabel(properties),
+      geometryType: feature.geometry?.type || "Unknown",
+      coordinateLabel: coordinateLabel(feature.geometry),
+      properties
+    }
+  };
+}
+
+function decorateGeoJson(geojson: GeoJsonObject): { geojson: GeoJsonObject; summaries: FeatureSummary[] } {
+  if (isFeatureCollection(geojson)) {
+    const decorated = geojson.features.map((feature, index) => decorateFeature(feature, index));
+    const featureCollection: FeatureCollection = { ...geojson, features: decorated.map((item) => item.feature) };
+    return {
+      geojson: featureCollection,
+      summaries: decorated.map((item) => item.summary)
+    };
+  }
+
+  if (isFeature(geojson)) {
+    const decorated = decorateFeature(geojson, 0);
+    return { geojson: decorated.feature, summaries: [decorated.summary] };
+  }
+
+  return { geojson, summaries: [] };
+}
+
+function compactJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function visiblePropertyEntries(properties: JsonRecord): [string, unknown][] {
+  return Object.entries(properties).filter(([key, value]) => !hiddenPropertyKeys.has(key) && value !== null && value !== undefined);
+}
+
+function providerStateLabel(configured?: boolean): string {
+  return configured ? "接続済み" : "未接続";
+}
+
 export default function GeoMapApp() {
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const dataLayerRef = useRef<LeafletGeoJSON | null>(null);
+  const layerByKeyRef = useRef(new Map<string, Layer>());
   const [query, setQuery] = useState(examples[0]);
   const [status, setStatus] = useState<MlitStatus | null>(null);
   const [message, setMessage] = useState("MCP設定を確認しています...");
   const [messageType, setMessageType] = useState<"info" | "error" | "success">("info");
   const [result, setResult] = useState("");
+  const [lastResponse, setLastResponse] = useState<MlitQueryResponse | null>(null);
+  const [features, setFeatures] = useState<FeatureSummary[]>([]);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [featureFilter, setFeatureFilter] = useState("");
+  const [panelTab, setPanelTab] = useState<PanelTab>("detail");
   const [isLoading, setIsLoading] = useState(false);
+
+  const selectedFeature = features.find((feature) => feature.key === selectedKey) || features[0] || null;
+  const filteredFeatures = useMemo(() => {
+    const keyword = featureFilter.trim().toLowerCase();
+    if (!keyword) {
+      return features;
+    }
+    return features.filter((feature) => {
+      const target = `${feature.title} ${feature.subtitle} ${feature.providerLabel} ${feature.coordinateLabel}`.toLowerCase();
+      return target.includes(keyword);
+    });
+  }, [featureFilter, features]);
+
+  const resultStats = useMemo(() => {
+    const pointCount = features.filter((feature) => feature.geometryType === "Point").length;
+    const areaCount = features.filter((feature) => feature.geometryType !== "Point").length;
+    return { pointCount, areaCount };
+  }, [features]);
 
   useEffect(() => {
     if (!mapNodeRef.current || mapRef.current) {
@@ -237,7 +383,8 @@ export default function GeoMapApp() {
         shadowUrl: assetSrc(markerShadow)
       });
 
-      const map = leaflet.map(mapNodeRef.current).setView([35.681236, 139.767125], 13);
+      const map = leaflet.map(mapNodeRef.current, { zoomControl: false }).setView([35.681236, 139.767125], 13);
+      leaflet.control.zoom({ position: "bottomright" }).addTo(map);
       leaflet.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap contributors"
@@ -271,6 +418,30 @@ export default function GeoMapApp() {
       });
   }, []);
 
+  function selectFeature(feature: FeatureSummary) {
+    const map = mapRef.current;
+    const layer = layerByKeyRef.current.get(feature.key);
+    setSelectedKey(feature.key);
+
+    if (!map || !layer) {
+      return;
+    }
+
+    if ("getLatLng" in layer && typeof layer.getLatLng === "function") {
+      const latLng = layer.getLatLng();
+      map.flyTo(latLng, Math.max(map.getZoom(), 15), { duration: 0.5 });
+    } else if ("getBounds" in layer && typeof layer.getBounds === "function") {
+      const bounds = layer.getBounds();
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [36, 36] });
+      }
+    }
+
+    if ("openPopup" in layer && typeof layer.openPopup === "function") {
+      layer.openPopup();
+    }
+  }
+
   function renderGeoJson(geojson: GeoJsonObject) {
     const map = mapRef.current;
     const leaflet = leafletRef.current;
@@ -281,18 +452,54 @@ export default function GeoMapApp() {
     if (dataLayerRef.current) {
       dataLayerRef.current.removeFrom(map);
     }
+    layerByKeyRef.current.clear();
 
-    const layer = leaflet.geoJSON(geojson, {
+    const decorated = decorateGeoJson(geojson);
+    setFeatures(decorated.summaries);
+    setSelectedKey(decorated.summaries[0]?.key || null);
+    setFeatureFilter("");
+    setPanelTab("detail");
+
+    const pathStyle: PathOptions = {
+      color: "#1268d8",
+      fillColor: "#2fb182",
+      fillOpacity: 0.22,
+      opacity: 0.88,
+      weight: 3
+    };
+
+    const layer = leaflet.geoJSON(decorated.geojson, {
+      style: () => pathStyle,
+      pointToLayer(_feature, latLng) {
+        return leaflet.circleMarker(latLng, {
+          radius: 7,
+          color: "#ffffff",
+          fillColor: "#0b63ce",
+          fillOpacity: 0.96,
+          opacity: 1,
+          weight: 2
+        });
+      },
       onEachFeature(feature, featureLayer) {
         const properties = (feature.properties || {}) as JsonRecord;
+        const key = textValue(properties.__geoai_key);
         const { datasetId, dataId } = getDataPlatformIds(properties);
         const popupLayer = featureLayer as typeof featureLayer & {
           setPopupContent: (content: string) => void;
-          on: (eventName: "popupopen", callback: () => void) => void;
+          on: (eventName: "popupopen" | "click", callback: () => void) => void;
         };
         let detailLoaded = false;
 
+        if (key) {
+          layerByKeyRef.current.set(key, featureLayer);
+        }
+
         popupLayer.bindPopup(buildPopupContent(properties));
+        popupLayer.on("click", () => {
+          if (key) {
+            setSelectedKey(key);
+          }
+        });
 
         if (datasetId && dataId) {
           popupLayer.on("popupopen", () => {
@@ -329,7 +536,7 @@ export default function GeoMapApp() {
     dataLayerRef.current = layer;
     const bounds = layer.getBounds();
     if (bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [28, 28] });
+      map.fitBounds(bounds, { padding: [46, 46] });
     }
   }
 
@@ -344,6 +551,7 @@ export default function GeoMapApp() {
 
     setIsLoading(true);
     setResult("");
+    setLastResponse(null);
     setMessage("国交省MCPサーバーへ問い合わせています...");
     setMessageType("info");
 
@@ -360,16 +568,21 @@ export default function GeoMapApp() {
       }
 
       const typedData = data as MlitQueryResponse;
-      setResult(typedData.text || JSON.stringify(typedData.raw, null, 2));
+      setLastResponse(typedData);
+      setResult(typedData.text || compactJson(typedData.raw));
 
       if (typedData.geojson) {
         renderGeoJson(typedData.geojson);
         setMessage(`取得成功: ${typedData.provider || "MCP"} / ${typedData.tool} を使って地図に表示しました。`);
         setMessageType("success");
       } else if (typedData.warning) {
+        setFeatures([]);
+        setSelectedKey(null);
         setMessage(typedData.warning);
         setMessageType("error");
       } else {
+        setFeatures([]);
+        setSelectedKey(null);
         setMessage("取得成功: GeoJSONは見つからなかったため、結果テキストのみ表示しています。");
         setMessageType("info");
       }
@@ -382,61 +595,163 @@ export default function GeoMapApp() {
   }
 
   return (
-    <main className={styles.shell}>
-      <aside className={styles.sidebar}>
-        <div className={styles.header}>
+    <main className={styles.appFrame}>
+      <section className={styles.commandPanel} aria-label="検索">
+        <div className={styles.brandBlock}>
           <span className={styles.kicker}>MLIT MCP / GeoAI</span>
-          <h1>GeoAI Map</h1>
-          <p>国土交通省MCPサーバーから欲しい地理空間データを取得し、GeoJSONを地図に表示します。</p>
+          <h1>GeoAI Map Console</h1>
         </div>
 
-        <form className={styles.form} onSubmit={handleSubmit}>
-          <label htmlFor="query">取得したいデータ</label>
+        <form className={styles.searchForm} onSubmit={handleSubmit}>
+          <label htmlFor="query">自然言語クエリ</label>
           <textarea
             id="query"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="例: 東京駅周辺の地価公示ポイント"
+            placeholder="例: 東京駅周辺 5km の道路を国土交通データプラットフォームから検索"
           />
-          <button type="submit" disabled={isLoading}>
-            {isLoading ? "取得中..." : "国交省MCPから取得"}
+          <button className={styles.primaryAction} type="submit" disabled={isLoading}>
+            {isLoading ? "解析・取得中" : "MCPで取得"}
           </button>
         </form>
 
-        <div className={styles.examples} aria-label="入力例">
+        <div className={styles.exampleGrid} aria-label="入力例">
           {examples.map((example) => (
-            <button
-              className={styles.exampleButton}
-              key={example}
-              type="button"
-              onClick={() => setQuery(example)}
-            >
+            <button className={styles.exampleButton} key={example} type="button" onClick={() => setQuery(example)}>
               {example}
             </button>
           ))}
         </div>
 
-        <section className={`${styles.status} ${styles[messageType]}`}>
+        <section className={`${styles.notice} ${styles[messageType]}`}>
           <strong>状態</strong>
           <span>{message}</span>
-          {status ? (
-            <small>
-              OpenAI: {status.openai_configured ? "configured" : "not configured"} / reinfolib:{" "}
-              {status.providers?.reinfolib?.api_configured || status.library_api_configured ? "configured" : "not configured"} / data platform:{" "}
-              {status.providers?.data_platform?.api_configured || status.data_platform_api_configured ? "configured" : "not configured"}
-            </small>
-          ) : null}
         </section>
 
-        <section className={styles.result}>
-          <h2>取得結果</h2>
-          <pre>{result || "まだ結果はありません。"}</pre>
+        <section className={styles.providerGrid} aria-label="接続状態">
+          <div>
+            <span>OpenAI</span>
+            <strong>{providerStateLabel(status?.openai_configured)}</strong>
+          </div>
+          <div>
+            <span>不動産情報</span>
+            <strong>{providerStateLabel(status?.providers?.reinfolib?.api_configured || status?.library_api_configured)}</strong>
+          </div>
+          <div>
+            <span>DPF</span>
+            <strong>{providerStateLabel(status?.providers?.data_platform?.api_configured || status?.data_platform_api_configured)}</strong>
+          </div>
         </section>
-      </aside>
 
-      <section className={styles.mapPane} aria-label="地図">
+        <section className={styles.runSummary} aria-label="取得サマリ">
+          <div>
+            <span>Provider</span>
+            <strong>{lastResponse?.provider || "-"}</strong>
+          </div>
+          <div>
+            <span>Tool</span>
+            <strong>{lastResponse?.tool || "-"}</strong>
+          </div>
+          <div>
+            <span>Features</span>
+            <strong>{features.length}</strong>
+          </div>
+        </section>
+      </section>
+
+      <section className={styles.mapStage} aria-label="地図">
+        <div className={styles.mapToolbar}>
+          <div>
+            <span>表示中</span>
+            <strong>{features.length ? `${features.length}件` : "データなし"}</strong>
+          </div>
+          <div>
+            <span>Point</span>
+            <strong>{resultStats.pointCount}</strong>
+          </div>
+          <div>
+            <span>Area/Line</span>
+            <strong>{resultStats.areaCount}</strong>
+          </div>
+        </div>
         <div className={styles.map} ref={mapNodeRef} />
       </section>
+
+      <aside className={styles.inspector} aria-label="結果">
+        <div className={styles.inspectorHeader}>
+          <div>
+            <span className={styles.kicker}>Results</span>
+            <h2>取得データ</h2>
+          </div>
+          <div className={styles.segmented}>
+            <button className={panelTab === "detail" ? styles.activeSegment : ""} type="button" onClick={() => setPanelTab("detail")}>
+              詳細
+            </button>
+            <button className={panelTab === "raw" ? styles.activeSegment : ""} type="button" onClick={() => setPanelTab("raw")}>
+              JSON
+            </button>
+          </div>
+        </div>
+
+        {panelTab === "detail" ? (
+          <>
+            <div className={styles.featureSearch}>
+              <label htmlFor="feature-filter">結果内検索</label>
+              <input
+                id="feature-filter"
+                value={featureFilter}
+                onChange={(event) => setFeatureFilter(event.target.value)}
+                placeholder="名称、データセット、座標"
+              />
+            </div>
+
+            <div className={styles.featureList} aria-label="フィーチャ一覧">
+              {filteredFeatures.length ? (
+                filteredFeatures.map((feature) => (
+                  <button
+                    className={`${styles.featureItem} ${feature.key === selectedFeature?.key ? styles.selectedFeature : ""}`}
+                    key={feature.key}
+                    type="button"
+                    onClick={() => selectFeature(feature)}
+                  >
+                    <span>{feature.providerLabel}</span>
+                    <strong>{feature.title}</strong>
+                    <small>{feature.subtitle}</small>
+                  </button>
+                ))
+              ) : (
+                <div className={styles.emptyState}>表示できる結果はまだありません。</div>
+              )}
+            </div>
+
+            <section className={styles.detailPane} aria-label="選択中データ">
+              {selectedFeature ? (
+                <>
+                  <div className={styles.detailTitle}>
+                    <span>{selectedFeature.geometryType}</span>
+                    <h3>{selectedFeature.title}</h3>
+                    {selectedFeature.coordinateLabel ? <p>{selectedFeature.coordinateLabel}</p> : null}
+                  </div>
+                  <dl className={styles.propertyGrid}>
+                    {visiblePropertyEntries(selectedFeature.properties).map(([key, value]) => (
+                      <div key={key}>
+                        <dt>{key}</dt>
+                        <dd>{typeof value === "object" ? compactJson(value) : String(value)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              ) : (
+                <div className={styles.emptyState}>地図上のデータを取得すると詳細が表示されます。</div>
+              )}
+            </section>
+          </>
+        ) : (
+          <section className={styles.rawPane} aria-label="Raw JSON">
+            <pre>{result || "まだ結果はありません。"}</pre>
+          </section>
+        )}
+      </aside>
     </main>
   );
 }

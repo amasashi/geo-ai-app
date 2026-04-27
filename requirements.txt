@@ -1,2 +1,13 @@
+anyio
+aiohttp
 fastapi
+mcp
+openai
+pyproj
+python-json-logger
+requests
+shapely
+tenacity
+typer
 uvicorn[standard]
+python-dotenv
